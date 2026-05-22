@@ -6,19 +6,21 @@
 """
 
 import os
-import re
 from datetime import datetime
 
 try:
-    import openpyxl
-except ImportError:
-    import subprocess
-    subprocess.check_call([os.path.join(".venv", "Scripts", "pip.exe"), "install", "openpyxl"])
-    import openpyxl
+    import _bootstrap  # noqa: F401
+except ModuleNotFoundError:
+    from scripts import _bootstrap  # noqa: F401
+from saas_crawler.core.dependencies import ensure_openpyxl
+from saas_crawler.core.exporters import clean_excel_value
+from saas_crawler.core.paths import DATA_DIR, ensure_runtime_dirs
+
+openpyxl = ensure_openpyxl()
 
 # ============ 配置 ============
-FEIGUA_FILE = "data/feigua_blogger_20260519_161712.xlsx"
-HUOHUA_FILE = "data/huohua_full_20260430_145400.xlsx"
+FEIGUA_FILE = os.path.join(DATA_DIR, "feigua_blogger_20260519_161712.xlsx")
+HUOHUA_FILE = os.path.join(DATA_DIR, "huohua_full_20260430_145400.xlsx")
 
 FEIGUA_UID_COL = "B站UID"    # 飞瓜表中的UID列名
 HUOHUA_MID_COL = "UP主MID"   # 火花表中的MID列名
@@ -55,8 +57,6 @@ def read_xlsx(path: str) -> tuple[list[str], list[dict]]:
 
 def save_xlsx(headers: list[str], rows: list[dict], filename: str):
     """保存到Excel"""
-    ILLEGAL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
-
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "合并数据"
@@ -68,9 +68,7 @@ def save_xlsx(headers: list[str], rows: list[dict], filename: str):
     for row_idx, row_data in enumerate(rows, 2):
         for col, header in enumerate(headers, 1):
             val = row_data.get(header, "")
-            if isinstance(val, str):
-                val = ILLEGAL_RE.sub("", val)
-            ws.cell(row=row_idx, column=col, value=val)
+            ws.cell(row=row_idx, column=col, value=clean_excel_value(val))
 
     for col_idx, header in enumerate(headers, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(len(str(header)) * 2 + 4, 12)
@@ -83,6 +81,8 @@ def main():
     print("=" * 50)
     print("  合并飞瓜 + 火花数据")
     print("=" * 50)
+
+    ensure_runtime_dirs()
 
     # 读取两份数据
     print(f"\n读取飞瓜表: {FEIGUA_FILE}")
@@ -140,7 +140,7 @@ def main():
 
     # 保存
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"data/merged_{timestamp}.xlsx"
+    filename = os.path.join(DATA_DIR, f"merged_{timestamp}.xlsx")
     save_xlsx(merged_headers, fg_data, filename)
 
     print(f"\n完成！")

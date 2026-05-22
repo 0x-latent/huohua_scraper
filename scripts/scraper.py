@@ -11,9 +11,7 @@ B站火花平台UP主数据抓取脚本
 
 import requests
 import time
-import json
 import os
-import yaml
 from datetime import datetime
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
@@ -21,17 +19,17 @@ import threading
 import queue
 
 try:
-    import openpyxl
-except ImportError:
-    print("正在安装 openpyxl...")
-    import subprocess
-    subprocess.check_call([os.path.join(".venv", "Scripts", "pip.exe"), "install", "openpyxl"])
-    import openpyxl
+    import _bootstrap  # noqa: F401
+except ModuleNotFoundError:
+    from scripts import _bootstrap  # noqa: F401
+from saas_crawler.core.checkpoint import load_json, remove_file, save_json_atomic
+from saas_crawler.core.config import build_browser_headers, load_yaml_config, require_cookie_list
+from saas_crawler.core.exporters import save_rows_to_excel
+from saas_crawler.core.paths import CHECKPOINT_DIR, CONFIG_FILE, DATA_DIR, ensure_runtime_dirs
 
 
 # ============ 配置区 ============
-CHECKPOINT_FILE = "checkpoint.json"
-CONFIG_FILE = "config.yaml"
+CHECKPOINT_FILE = os.path.join(CHECKPOINT_DIR, "checkpoint.json")
 
 BASE_URL = "https://huahuo.bilibili.com/commercialorder/api/web_api/v1/advertiser/upper_square/search"
 CT_ID = "XBhqj6L6Amz9L13roEtHN"
@@ -42,32 +40,23 @@ REQUEST_DELAY = 2.0
 SAVE_EVERY = 20
 
 
+def ensure_dirs():
+    ensure_runtime_dirs()
+
+
 def load_config() -> list[dict]:
     """加载配置，返回 headers 列表（每个Cookie一套）"""
-    if not os.path.exists(CONFIG_FILE):
-        print(f"错误: 找不到 {CONFIG_FILE}，请创建并填入 cookies")
-        exit(1)
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    cookies = cfg.get("cookies", [])
-    # 兼容旧版单cookie格式
-    if not cookies and cfg.get("cookie"):
-        cookies = [cfg["cookie"]]
-
-    if not cookies:
+    try:
+        cfg = load_yaml_config(CONFIG_FILE)
+        cookies = require_cookie_list(cfg, "cookies", fallback_key="cookie")
+    except (FileNotFoundError, ValueError) as e:
         print(f"错误: {CONFIG_FILE} 中未配置任何 cookie")
+        print(e)
         exit(1)
 
     headers_list = []
     for cookie in cookies:
-        cookie = cookie.strip()
-        if cookie:
-            headers_list.append({
-                "Cookie": cookie,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-                "Referer": "https://huahuo.bilibili.com/",
-            })
+        headers_list.append(build_browser_headers(cookie, "https://huahuo.bilibili.com/"))
 
     return headers_list
 
@@ -75,10 +64,7 @@ def load_config() -> list[dict]:
 # ============ 断点管理 ============
 
 def load_checkpoint() -> dict:
-    if os.path.exists(CHECKPOINT_FILE):
-        with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return load_json(CHECKPOINT_FILE)
 
 
 def save_checkpoint(page_results: dict, total_pages: int):
@@ -88,15 +74,11 @@ def save_checkpoint(page_results: dict, total_pages: int):
         "page_data": page_results,
         "updated_at": datetime.now().isoformat(),
     }
-    tmp = CHECKPOINT_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, CHECKPOINT_FILE)
+    save_json_atomic(CHECKPOINT_FILE, data)
 
 
 def clear_checkpoint():
-    if os.path.exists(CHECKPOINT_FILE):
-        os.remove(CHECKPOINT_FILE)
+    remove_file(CHECKPOINT_FILE)
 
 
 # ============ 请求 ============
@@ -318,28 +300,7 @@ def extract_row(item: dict) -> dict:
 # ============ 导出 ============
 
 def save_to_excel(rows: list[dict], filename: str):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "UP主数据"
-
-    if not rows:
-        print("没有数据可保存")
-        return
-
-    headers = list(rows[0].keys())
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = openpyxl.styles.Font(bold=True)
-
-    for row_idx, row_data in enumerate(rows, 2):
-        for col, header in enumerate(headers, 1):
-            ws.cell(row=row_idx, column=col, value=row_data.get(header, ""))
-
-    for col_idx, header in enumerate(headers, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(len(header) * 2 + 4, 12)
-
-    wb.save(filename)
-    print(f"数据已保存到: {filename}")
+    save_rows_to_excel(rows, filename, sheet_name="UP主数据")
 
 
 # ============ 主流程 ============
@@ -349,6 +310,7 @@ def main():
     print("B站火花平台UP主数据抓取")
     print("=" * 50)
 
+    ensure_dirs()
     headers_list = load_config()
     num_cookies = len(headers_list)
     print(f"已加载 {num_cookies} 个 Cookie")
@@ -448,13 +410,13 @@ def main():
 
     # 保存Excel
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"huohua_upzhu_{timestamp}.xlsx"
+    filename = os.path.join(DATA_DIR, f"huohua_upzhu_{timestamp}.xlsx")
     save_to_excel(all_rows, filename)
 
     if not failed_pages:
         # 保留原始数据用于重新导出，不再自动删除
-        print("全部抓取成功，原始数据保留在 checkpoint.json（可用于重新导出）")
-        print("如需清除请手动删除: del checkpoint.json")
+        print(f"全部抓取成功，原始数据保留在 {CHECKPOINT_FILE}（可用于重新导出）")
+        print(f"如需清除请手动删除: {CHECKPOINT_FILE}")
 
     print(f"\n文件: {filename}")
 

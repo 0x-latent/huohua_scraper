@@ -22,18 +22,18 @@ from datetime import datetime
 
 from playwright.async_api import async_playwright
 
-try:
-    import openpyxl
-except ImportError:
-    import subprocess
-    subprocess.check_call([os.path.join(".venv", "Scripts", "pip.exe"), "install", "openpyxl"])
-    import openpyxl
-
 from tqdm import tqdm
+
+try:
+    import _bootstrap  # noqa: F401
+except ModuleNotFoundError:
+    from scripts import _bootstrap  # noqa: F401
+from saas_crawler.core.checkpoint import load_json, save_json_atomic
+from saas_crawler.core.exporters import save_rows_to_excel
+from saas_crawler.core.paths import CHECKPOINT_DIR, DATA_DIR, WINDOWS_SCRIPTS_DIR, ensure_runtime_dirs
 
 
 # ============ 配置 ============
-CHECKPOINT_DIR = "checkpoints"
 PHASE1_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "phase1_list.json")
 PHASE2_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "phase2_detail.json")
 
@@ -64,21 +64,15 @@ CAPTCHA_TIMEOUT = 300
 # ============ 工具函数 ============
 
 def ensure_dir():
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    ensure_runtime_dirs()
 
 
 def load_checkpoint(path: str) -> dict:
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return load_json(path)
 
 
 def save_checkpoint_file(path: str, data: dict):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    save_json_atomic(path, data)
 
 
 
@@ -581,28 +575,7 @@ def build_row(search_item: dict, detail: dict) -> dict:
 
 
 def save_to_excel(rows: list[dict], filename: str):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "UP主数据"
-
-    if not rows:
-        print("没有数据可保存")
-        return
-
-    headers = list(rows[0].keys())
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = openpyxl.styles.Font(bold=True)
-
-    for row_idx, row_data in enumerate(rows, 2):
-        for col, header in enumerate(headers, 1):
-            ws.cell(row=row_idx, column=col, value=row_data.get(header, ""))
-
-    for col_idx, header in enumerate(headers, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(len(str(header)) * 2 + 4, 12)
-
-    wb.save(filename)
-    print(f"数据已保存到: {filename}")
+    save_rows_to_excel(rows, filename, sheet_name="UP主数据")
 
 
 # ============ 主流程 ============
@@ -638,7 +611,8 @@ def wait_for_chrome():
                stdout=sp.DEVNULL, stderr=sp.DEVNULL)
         time.sleep(3)
         # 用bat文件启动（避免路径转义问题）
-        bat_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "start_chrome.bat")
+        bat_path = os.path.join(WINDOWS_SCRIPTS_DIR, "start_chrome.bat")
+        os.makedirs(os.path.dirname(bat_path), exist_ok=True)
         if not os.path.exists(bat_path):
             with open(bat_path, "w") as f:
                 f.write('@echo off\n')
@@ -658,7 +632,7 @@ def wait_for_chrome():
               ' --remote-debugging-port=9222'
               ' --user-data-dir="C:\\Users\\pc\\AppData\\Local\\Google\\ChromeDebug"')
         print()
-        print("  或者直接双击项目目录下的 start_chrome.bat")
+        print(f"  或者直接双击 {bat_path}")
         print()
         print("  注意: 必须使用独立目录(ChromeDebug)，不能用默认目录")
         print("  首次使用需要在Chrome中登录 https://huahuo.bilibili.com")
@@ -804,7 +778,7 @@ async def main():
                         all_rows.append(build_row(item, detail))
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"huohua_full_{timestamp}.xlsx"
+                filename = os.path.join(DATA_DIR, f"huohua_full_{timestamp}.xlsx")
                 save_to_excel(all_rows, filename)
 
                 print(f"总计: {len(all_rows)} 条数据")

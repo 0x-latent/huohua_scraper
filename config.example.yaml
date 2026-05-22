@@ -1,0 +1,8 @@
+# Copy this file to config.yaml and fill in real cookies locally.
+# Do not commit real account cookies.
+
+cookies:
+  - "your_huohua_cookie_here"
+
+feigua_cookies:
+  - "your_feigua_cookie_here"

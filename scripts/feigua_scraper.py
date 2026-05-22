@@ -10,24 +10,22 @@
 
 import requests
 import time
-import json
 import os
 import re
-import yaml
 from datetime import datetime
 from tqdm import tqdm
 
 try:
-    import openpyxl
-except ImportError:
-    import subprocess
-    subprocess.check_call([os.path.join(".venv", "Scripts", "pip.exe"), "install", "openpyxl"])
-    import openpyxl
+    import _bootstrap  # noqa: F401
+except ModuleNotFoundError:
+    from scripts import _bootstrap  # noqa: F401
+from saas_crawler.core.checkpoint import load_json, save_json_atomic
+from saas_crawler.core.config import build_browser_headers, load_yaml_config, require_cookie_list
+from saas_crawler.core.exporters import save_rows_to_excel
+from saas_crawler.core.paths import CHECKPOINT_DIR, CONFIG_FILE, DATA_DIR, ensure_runtime_dirs
 
 
 # ============ 配置 ============
-CONFIG_FILE = "config.yaml"
-CHECKPOINT_DIR = "checkpoints"
 MCN_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "feigua_mcn.json")
 BLOGGER_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "feigua_blogger.json")
 RANK_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "feigua_rank.json")
@@ -40,50 +38,27 @@ SAVE_EVERY = 5       # 每N个MCN保存一次断点
 # ============ 工具函数 ============
 
 def ensure_dir():
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    ensure_runtime_dirs()
 
 
 def load_config() -> dict:
-    if not os.path.exists(CONFIG_FILE):
-        print(f"错误: 找不到 {CONFIG_FILE}")
-        exit(1)
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    cookies = cfg.get("feigua_cookies", [])
-    if not cookies:
+    try:
+        cfg = load_yaml_config(CONFIG_FILE)
+        cookie = require_cookie_list(cfg, "feigua_cookies")[0]
+    except (FileNotFoundError, ValueError) as e:
         print(f"错误: {CONFIG_FILE} 中未配置 feigua_cookies")
+        print(e)
         exit(1)
 
-    cookie = cookies[0].strip()
-    headers = {
-        "Cookie": cookie,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        "Referer": "https://bz.feigua.cn/",
-    }
-    return headers
+    return build_browser_headers(cookie, "https://bz.feigua.cn/")
 
 
 def load_checkpoint(path: str) -> dict:
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return load_json(path)
 
 
 def save_checkpoint(path: str, data: dict):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    for attempt in range(5):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            time.sleep(1)
-    # 最后兜底：直接写目标文件
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
+    save_json_atomic(path, data)
 
 
 def ts():
@@ -708,42 +683,7 @@ def build_row(item: dict, mcn_name: str) -> dict:
 
 
 def save_to_excel(rows: list[dict], filename: str):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "飞瓜UP主数据"
-
-    if not rows:
-        print("没有数据可保存")
-        return
-
-    # 收集所有可能的列（因为有/无详情字段数不同）
-    all_headers = []
-    seen = set()
-    for row in rows:
-        for k in row.keys():
-            if k not in seen:
-                all_headers.append(k)
-                seen.add(k)
-
-    for col, header in enumerate(all_headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = openpyxl.styles.Font(bold=True)
-
-    # 清除Excel不允许的控制字符
-    ILLEGAL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
-
-    for row_idx, row_data in enumerate(rows, 2):
-        for col, header in enumerate(all_headers, 1):
-            val = row_data.get(header, "")
-            if isinstance(val, str):
-                val = ILLEGAL_RE.sub("", val)
-            ws.cell(row=row_idx, column=col, value=val)
-
-    for col_idx, header in enumerate(all_headers, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(len(str(header)) * 2 + 4, 12)
-
-    wb.save(filename)
-    print(f"数据已保存到: {filename}")
+    save_rows_to_excel(rows, filename, sheet_name="飞瓜UP主数据")
 
 
 # ============ 主流程 ============
@@ -841,7 +781,7 @@ def main():
                 continue
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"feigua_blogger_{timestamp}.xlsx"
+            filename = os.path.join(DATA_DIR, f"feigua_blogger_{timestamp}.xlsx")
             save_to_excel(all_rows, filename)
 
             print(f"\n总计: {len(all_rows)} 条")
